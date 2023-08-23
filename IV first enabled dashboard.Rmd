@@ -1,0 +1,87 @@
+---
+title: "IV Dashboard Impact on Self-Enablement"
+output: 
+  flexdashboard::flex_dashboard:
+    
+    orientation: columns
+    social: menu
+    source_code: embed
+---
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+#Income verification experimentation revenue impact estimate
+
+library(tidyverse)
+library(prophet)
+library(lubridate)
+library(dygraphs)
+library(xts)
+library(quantmod)
+library(flexdashboard)
+
+ns = as_tibble(read.csv("IV - Day First Enabled by Customer by Day.csv")) #read in data - should be updated to read directly from Cupola query
+
+ns$Day = as.Date(ns$IV_ENABLED_DAY)
+
+ns = ns  %>% arrange(Day) %>% mutate(CUM_SELF_ENABLED = cumsum(SELF_ENABLED))
+
+##prophet model
+z = ns %>% select(Day,CUM_SELF_ENABLED) %>% rename(ds = 1, y = 2)
+
+z = z %>% filter(ds < "2022-03-07") #day IV awareness dash go live
+
+#account for seasonal trends 
+z$sat = ifelse(weekdays(as.Date(z$ds)) == 'Saturday',1,0)
+z$sun = ifelse(weekdays(as.Date(z$ds)) == 'Sunday',1,0)
+z$m1 = ifelse(day(z$ds) == 1,1,0) #add binary dummy variable for first of the month
+z$m2 = ifelse(day(z$ds) == 2,1,0) #add binary dummy variable for second of the month
+z$m31 = ifelse(day(z$ds) == 31,1,0) #add binary dummy variable for 31st of the month
+z$m30 = ifelse(day(z$ds) == 30,1,0) #add binary dummy variable for 30th of the month
+
+
+m <- prophet(daily.seasonality = 50, changepoint.prior.scale = 0.5, seasonality.prior.scale = 0.1)
+m <- add_regressor(m,'m1')
+m <- add_regressor(m,'m2')
+m <- add_regressor(m,'m31')
+m <- add_regressor(m,'m30')
+m <- add_regressor(m,'sat')
+m <- add_regressor(m,'sun')
+m  = add_country_holidays(m, 'US')
+m <- add_seasonality(m, name='monthly', period=30.5, fourier.order=5)
+m <- fit.prophet(m, z)
+
+future <- make_future_dataframe(m, periods = 60)
+future$sat = ifelse(weekdays(as.Date(future$ds)) == 'Saturday',1,0)
+future$sun = ifelse(weekdays(as.Date(future$ds)) == 'Sunday',1,0)
+future$m1 = ifelse(day(future$ds) == 1,1,0) #add binary dummy variable for first of the month
+future$m2 = ifelse(day(future$ds) == 2,1,0) #add binary dummy variable for second of the month
+future$m31 = ifelse(day(future$ds) == 31,1,0) #add binary dummy variable for 31st of the month
+future$m30 = ifelse(day(future$ds) == 30,1,0) #add binary dummy variable for 30th of the month
+
+forecast <- predict(m, future)
+prophet_plot_components(m, forecast) ##use these to create plots
+dyplot.prophet(m, forecast)
+
+d = ns %>% filter(Day == max(Day)) %>% select(Day) #select max day in actuals
+
+round(ns$CUM_SELF_ENABLED[which(ns$Day == '2022-04-28')] - forecast$yhat[409],0) #why is it so hard to do date logic on the forecast object...argh  5 more self-enabled than expected on 2022-04-28
+
+round(ns$CUM_SELF_ENABLED[which(ns$Day == '2022-04-28')] - forecast$yhat_upper[409],0) #71 fewer
+
+round(ns$CUM_SELF_ENABLED[which(ns$Day == '2022-04-28')] - forecast$yhat_lower[409],0) #87 more 
+
+#create xts object for plotting
+z1 = ns %>% select(Day,CUM_SELF_ENABLED) %>% rename(ds = 1, y = 2)
+z3 = forecast %>% select(ds, yhat, yhat_lower, yhat_upper)
+
+z2 = left_join(z1,z3)
+
+z4 = xts(x = z2, order.by = z2$ds)
+
+```
+```{r}
+dygraph(z4) %>% dySeries(c("yhat_lower", "yhat", "yhat_upper"), label = "forecast") %>% dySeries("y", label = "actual") %>% dyOptions(colors = RColorBrewer::brewer.pal(3, "Set1")) %>% dyLegend(show = "onmouseover") %>% dyRangeSelector() %>% dyEvent("2022-03-07", "IV Dashboard Banner Go-Live", labelLoc = "bottom")
+```
+
+
+
